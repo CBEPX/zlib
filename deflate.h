@@ -81,6 +81,11 @@ typedef struct tree_desc_s {
 typedef uint16_t Pos;
 typedef uint32_t IPos;
 
+typedef union {
+    Pos pos[4];
+    uint64_t pos_s;
+} Posx4;
+
 /* A Pos is an index in the character window. We use short instead of int to
  * save space in the various tables. IPos is used only for parameter passing.
  */
@@ -118,10 +123,18 @@ typedef struct internal_state {
      * is directly used as sliding window.
      */
 
-    Pos *prev;
+    Posx4 *prev;
     /* Link to older string with same hash index. To limit the size of this
      * array to 64K, this link is maintained only for the last 32K strings.
      * An index in this array is thus a window index modulo 32K.
+     */
+    /* Apparently one of the heaviest operations of deflate is the traversal
+     * of the linked list for false positives, to reduce the amount of time 
+     * spent on cache misses and branch mispredictions, I modified the list
+     * to hold pointers to 4 previous elements in the list. This increases the
+     * size of the list by 4x, but improves performance significantly for lvls
+     * 6-9. For the lower levels the speedup in list search is offset by the
+     * longer time it takes to insert a new hash value
      */
 
     Pos *head; /* Heads of the hash chains or NIL. */

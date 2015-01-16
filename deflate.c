@@ -147,16 +147,19 @@ static uint32_t hash_func(deflate_state *s, void* str) {
 static Pos insert_string(deflate_state *s, Pos str) {
     Pos match_head;
     s->ins_h = hash_func(s, &s->window[str]);
-    match_head = s->prev[(str) & s->w_mask] = s->head[s->ins_h];
+    match_head = s->head[s->ins_h];
+    s->prev[(str) & s->w_mask].pos_s = (s->prev[match_head & s->w_mask].pos_s << 16) ^ match_head;
     s->head[s->ins_h] = (Pos)str;
     return match_head;
 }
 
 static void bulk_insert_str(deflate_state *s, Pos startpos, uint32_t count) {
     uint32_t idx;
+    Pos match_head;
     for (idx = 0; idx < count; idx++) {
         s->ins_h = hash_func(s, &s->window[startpos + idx]);
-        s->prev[(startpos + idx) & s->w_mask] = s->head[s->ins_h];
+        match_head = s->head[s->ins_h];
+        s->prev[(startpos + idx) & s->w_mask].pos_s = (s->prev[match_head & s->w_mask].pos_s << 16) ^ match_head;
         s->head[s->ins_h] = (Pos)(startpos + idx);
     }
 }
@@ -269,7 +272,7 @@ int ZEXPORT deflateInit2_(strm, level, method, windowBits, memLevel, strategy,
     s->hash_mask = s->hash_size - 1;
 
     s->window = (uint8_t *) ZALLOC(strm, s->w_size, 2*sizeof(uint8_t));
-    s->prev   = (Pos *)  ZALLOC(strm, s->w_size, sizeof(Pos));
+    s->prev   = (Posx4 *)  ZALLOC(strm, s->w_size, sizeof(Posx4));
     s->head   = (Pos *)  ZALLOC(strm, s->hash_size, sizeof(Pos));
 
     s->high_water = 0;      /* nothing written to s->window yet */
@@ -345,7 +348,7 @@ int ZEXPORT deflateSetDictionary (strm, dictionary, dictLength)
         uint32_t ins_h = s->ins_h;
         do {
             ins_h = hash_func(s, &s->window[str]);
-            s->prev[str & s->w_mask] = s->head[ins_h];
+            s->prev[str & s->w_mask].pos_s = (s->prev[s->head[ins_h] & s->w_mask].pos_s << 16) ^ s->head[ins_h];
             s->head[ins_h] = (Pos)str;
             str++;
         } while (--n);
@@ -1001,7 +1004,7 @@ int ZEXPORT deflateCopy (dest, source)
     ds->strm = dest;
 
     ds->window = (uint8_t *) ZALLOC(dest, ds->w_size, 2*sizeof(uint8_t));
-    ds->prev   = (Pos *)  ZALLOC(dest, ds->w_size, sizeof(Pos));
+    ds->prev   = (Posx4 *)  ZALLOC(dest, ds->w_size, sizeof(Posx4));
     ds->head   = (Pos *)  ZALLOC(dest, ds->hash_size, sizeof(Pos));
     overlay = (uint16_t *) ZALLOC(dest, ds->lit_bufsize, sizeof(uint16_t)+2);
     ds->pending_buf = (uint8_t *) overlay;
@@ -1013,7 +1016,7 @@ int ZEXPORT deflateCopy (dest, source)
     }
     /* following zmemcpy do not work for 16-bit MSDOS */
     zmemcpy(ds->window, ss->window, ds->w_size * 2 * sizeof(uint8_t));
-    zmemcpy((voidpf)ds->prev, (voidpf)ss->prev, ds->w_size * sizeof(Pos));
+    zmemcpy((void*)ds->prev, (void*)ss->prev, ds->w_size * sizeof(Posx4));
     zmemcpy((voidpf)ds->head, (voidpf)ss->head, ds->hash_size * sizeof(Pos));
     zmemcpy(ds->pending_buf, ss->pending_buf, (uint32_t)ds->pending_buf_size);
 
@@ -1164,13 +1167,14 @@ static uint32_t longest_match(s, cur_match)
     /* Stop when cur_match becomes <= limit. To simplify the code,
      * we prevent matches with the string of window index 0.
      */
-    Pos *prev = s->prev;
+    Posx4 *prev = s->prev;
+    uint64_t pos_s;
     uint32_t wmask = s->w_mask;
 
     register uint8_t *strend = s->window + s->strstart + MAX_MATCH;
     /* We optimize for a minimal match of four bytes */
-    register uint32_t scan_start = *(uInt*)scan;
-    register uint16_t scan_end   = *(ushf*)(scan+best_len-1);
+    register uint32_t scan_start = *(uint32_t*)scan;
+    register uint16_t scan_end   = *(uint16_t*)(scan+best_len-1);
 
     /* The code is optimized for HASH_BITS >= 8 and MAX_MATCH-2 multiple of 16.
      * It is easy to get rid of this optimization if necessary.
@@ -1188,6 +1192,7 @@ static uint32_t longest_match(s, cur_match)
 
     Assert((uint64_t)s->strstart <= s->window_size-MIN_LOOKAHEAD, "need lookahead");
 
+    pos_s = prev[cur_match & wmask].pos_s;
     do {
         Assert(cur_match < s->strstart, "no future");
 
@@ -1204,8 +1209,10 @@ static uint32_t longest_match(s, cur_match)
         do {
             match = win + cur_match;
             if (likely(*(uint16_t*)(match+best_len-1) != scan_end) || (*(uint32_t*)match != scan_start)) {
-                if ((cur_match = prev[cur_match & wmask]) > limit
+                if ((cur_match = pos_s & 0xffff) > limit
                     && --chain_length != 0) {
+                    pos_s >>= 16;
+                    if(!pos_s) pos_s = prev[cur_match & wmask].pos_s;
                     continue;
                 } else
                     cont = 0;
@@ -1247,7 +1254,10 @@ static uint32_t longest_match(s, cur_match)
             if (len >= nice_match) break;
             scan_end = *(ushf*)(scan+best_len-1);
         }
-    } while ((cur_match = prev[cur_match & wmask]) > limit
+        cur_match = pos_s & 0xffff;
+        pos_s >>= 16;
+        if(!pos_s) pos_s = prev[cur_match & wmask].pos_s;
+    } while (cur_match > limit
              && --chain_length != 0);
 
     if ((uInt)best_len <= s->lookahead) return (uInt)best_len;
@@ -1346,7 +1356,7 @@ static void fill_window(s)
                 q++;
             }
 
-            n = wsize;
+            n = wsize * (sizeof(typeof(*s->prev)) / 2);
             q = (__m128i*)s->prev;
             /* assuming wsize would always be a pot */
             for(i=0; i<n/8; i++) {
@@ -1380,7 +1390,7 @@ static void fill_window(s)
             uint32_t ins_h = s->window[str];
             while (s->insert) {
                 ins_h = hash_func(s, &s->window[str]);
-                s->prev[str & s->w_mask] = s->head[ins_h];
+                s->prev[str & s->w_mask].pos_s = (s->prev[s->head[ins_h] & s->w_mask].pos_s << 16) ^ s->head[ins_h];
                 s->head[ins_h] = (Pos)str;
                 str++;
                 s->insert--;
