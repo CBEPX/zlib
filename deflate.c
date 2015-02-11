@@ -144,23 +144,23 @@ static uint32_t hash_func(deflate_state *s, void* str) {
  * IN  assertion: ACTUAL_MIN_MATCH bytes of str are valid
  *    (except for the last ACTUAL_MIN_MATCH-1 bytes of the input file).
  */
-static Pos insert_string(deflate_state *s, Pos str) {
-    Pos match_head;
-    s->ins_h = hash_func(s, &s->window[str]);
-    match_head = s->head[s->ins_h];
-    s->prev[(str) & s->w_mask].pos_s = (s->prev[match_head & s->w_mask].pos_s << 16) ^ match_head;
-    s->head[s->ins_h] = (Pos)str;
+static Posx4 insert_string(deflate_state *s, Pos str) {
+    Posx4 match_head;
+    uint32_t ins_h = hash_func(s, &s->window[str]);
+    match_head = s->head[ins_h];
+    s->prev[(str) & s->w_mask] = match_head;
+    s->head[ins_h].pos_s = (match_head.pos_s << 16) ^ str;
     return match_head;
 }
 
 static void bulk_insert_str(deflate_state *s, Pos startpos, uint32_t count) {
     uint32_t idx;
-    Pos match_head;
     for (idx = 0; idx < count; idx++) {
-        s->ins_h = hash_func(s, &s->window[startpos + idx]);
-        match_head = s->head[s->ins_h];
-        s->prev[(startpos + idx) & s->w_mask].pos_s = (s->prev[match_head & s->w_mask].pos_s << 16) ^ match_head;
-        s->head[s->ins_h] = (Pos)(startpos + idx);
+        uint32_t ins_h = hash_func(s, &s->window[startpos + idx]);
+        Posx4 match_head = s->head[ins_h];
+
+        s->prev[(startpos + idx) & s->w_mask] = match_head;
+        s->head[ins_h].pos_s = (match_head.pos_s << 16) ^ (startpos + idx);
     }
 }
 
@@ -273,7 +273,7 @@ int ZEXPORT deflateInit2_(strm, level, method, windowBits, memLevel, strategy,
 
     s->window = (uint8_t *) ZALLOC(strm, s->w_size, 2*sizeof(uint8_t));
     s->prev   = (Posx4 *)  ZALLOC(strm, s->w_size, sizeof(Posx4));
-    s->head   = (Pos *)  ZALLOC(strm, s->hash_size, sizeof(Pos));
+    s->head   = (Posx4 *)  ZALLOC(strm, s->hash_size, sizeof(Posx4));
 
     s->high_water = 0;      /* nothing written to s->window yet */
 
@@ -345,14 +345,13 @@ int ZEXPORT deflateSetDictionary (strm, dictionary, dictLength)
     while (s->lookahead >= ACTUAL_MIN_MATCH) {
         str = s->strstart;
         n = s->lookahead - (ACTUAL_MIN_MATCH-1);
-        uint32_t ins_h = s->ins_h;
         do {
-            ins_h = hash_func(s, &s->window[str]);
-            s->prev[str & s->w_mask].pos_s = (s->prev[s->head[ins_h] & s->w_mask].pos_s << 16) ^ s->head[ins_h];
-            s->head[ins_h] = (Pos)str;
+            uint32_t ins_h = hash_func(s, &s->window[str]);
+            Posx4 match_head = s->head[ins_h];
+            s->prev[str & s->w_mask] = match_head;
+            s->head[ins_h].pos_s = (match_head.pos_s << 16) ^ str;
             str++;
         } while (--n);
-        s->ins_h = ins_h;
         s->strstart = str;
         s->lookahead = ACTUAL_MIN_MATCH-1;
         fill_window(s);
@@ -1005,7 +1004,7 @@ int ZEXPORT deflateCopy (dest, source)
 
     ds->window = (uint8_t *) ZALLOC(dest, ds->w_size, 2*sizeof(uint8_t));
     ds->prev   = (Posx4 *)  ZALLOC(dest, ds->w_size, sizeof(Posx4));
-    ds->head   = (Pos *)  ZALLOC(dest, ds->hash_size, sizeof(Pos));
+    ds->head   = (Posx4 *)  ZALLOC(dest, ds->hash_size, sizeof(Posx4));
     overlay = (uint16_t *) ZALLOC(dest, ds->lit_bufsize, sizeof(uint16_t)+2);
     ds->pending_buf = (uint8_t *) overlay;
 
@@ -1017,7 +1016,7 @@ int ZEXPORT deflateCopy (dest, source)
     /* following zmemcpy do not work for 16-bit MSDOS */
     zmemcpy(ds->window, ss->window, ds->w_size * 2 * sizeof(uint8_t));
     zmemcpy((void*)ds->prev, (void*)ss->prev, ds->w_size * sizeof(Posx4));
-    zmemcpy((voidpf)ds->head, (voidpf)ss->head, ds->hash_size * sizeof(Pos));
+    zmemcpy((void*)ds->head, (void*)ss->head, ds->hash_size * sizeof(Posx4));
     zmemcpy(ds->pending_buf, ss->pending_buf, (uint32_t)ds->pending_buf_size);
 
     ds->pending_out = ds->pending_buf + (ss->pending_out - ss->pending_buf);
@@ -1152,9 +1151,9 @@ static void lm_init (s)
  *       -------------------------------------------------
  */
 
-static uint32_t longest_match(s, cur_match)
+static uint32_t longest_match(s, match_head)
     deflate_state *s;
-    IPos cur_match;                             /* current match */
+    Posx4 match_head;                             /* current match */
 {
     uint32_t chain_length = s->max_chain_length;/* max hash chain length */
     register uint8_t *scan = s->window + s->strstart; /* current string */
@@ -1168,13 +1167,13 @@ static uint32_t longest_match(s, cur_match)
      * we prevent matches with the string of window index 0.
      */
     Posx4 *prev = s->prev;
-    uint64_t pos_s;
+    uint64_t pos_s = match_head.pos_s;
     uint32_t wmask = s->w_mask;
 
     register uint8_t *strend = s->window + s->strstart + MAX_MATCH;
     /* We optimize for a minimal match of four bytes */
     register uint32_t scan_start = *(uint32_t*)scan;
-    register uint16_t scan_end   = *(uint16_t*)(scan+best_len-1);
+    register uint32_t scan_end   = *(uint32_t*)(scan+best_len-3);
 
     /* The code is optimized for HASH_BITS >= 8 and MAX_MATCH-2 multiple of 16.
      * It is easy to get rid of this optimization if necessary.
@@ -1191,8 +1190,8 @@ static uint32_t longest_match(s, cur_match)
     if ((uint32_t)nice_match > s->lookahead) nice_match = s->lookahead;
 
     Assert((uint64_t)s->strstart <= s->window_size-MIN_LOOKAHEAD, "need lookahead");
-
-    pos_s = prev[cur_match & wmask].pos_s;
+    uint64_t cur_match = pos_s & 0xffff;
+    pos_s >>= 16;
     do {
         Assert(cur_match < s->strstart, "no future");
 
@@ -1208,7 +1207,7 @@ static uint32_t longest_match(s, cur_match)
         int cont = 1;
         do {
             match = win + cur_match;
-            if (likely(*(uint16_t*)(match+best_len-1) != scan_end) || (*(uint32_t*)match != scan_start)) {
+            if (likely(*(uint32_t*)(match+best_len-3) != scan_end) || (*(uint32_t*)match != scan_start)) {
                 if ((cur_match = pos_s & 0xffff) > limit
                     && --chain_length != 0) {
                     pos_s >>= 16;
@@ -1224,7 +1223,6 @@ static uint32_t longest_match(s, cur_match)
             break;
 
         scan += 4, match+=4;
-        Assert(*scan == *match, "match[2]?");
         do {
             uint64_t sv = *(uint64_t*)(void*)scan;
             uint64_t mv = *(uint64_t*)(void*)match;
@@ -1252,7 +1250,7 @@ static uint32_t longest_match(s, cur_match)
             s->match_start = cur_match;
             best_len = len;
             if (len >= nice_match) break;
-            scan_end = *(ushf*)(scan+best_len-1);
+            scan_end = *(uint32_t*)(scan+best_len-3);
         }
         cur_match = pos_s & 0xffff;
         pos_s >>= 16;
@@ -1260,7 +1258,7 @@ static uint32_t longest_match(s, cur_match)
     } while (cur_match > limit
              && --chain_length != 0);
 
-    if ((uInt)best_len <= s->lookahead) return (uInt)best_len;
+    if ((uint32_t)best_len <= s->lookahead) return (uint32_t)best_len;
     return s->lookahead;
 }
 
@@ -1346,7 +1344,7 @@ static void fill_window(s)
              */
             
             /* Use intrinsics, because compiler generates suboptimal code */
-            n = s->hash_size;
+            n = s->hash_size * 4;
             __m128i W = _mm_set1_epi16(wsize);
             __m128i *q = (__m128i*)s->head;
             int i;
@@ -1356,7 +1354,7 @@ static void fill_window(s)
                 q++;
             }
 
-            n = wsize * (sizeof(typeof(*s->prev)) / 2);
+            n = wsize * 4;
             q = (__m128i*)s->prev;
             /* assuming wsize would always be a pot */
             for(i=0; i<n/8; i++) {
@@ -1387,17 +1385,16 @@ static void fill_window(s)
         /* Initialize the hash value now that we have some input: */
         if (s->lookahead + s->insert >= ACTUAL_MIN_MATCH) {
             uint32_t str = s->strstart - s->insert;
-            uint32_t ins_h = s->window[str];
             while (s->insert) {
-                ins_h = hash_func(s, &s->window[str]);
-                s->prev[str & s->w_mask].pos_s = (s->prev[s->head[ins_h] & s->w_mask].pos_s << 16) ^ s->head[ins_h];
-                s->head[ins_h] = (Pos)str;
+                uint32_t ins_h = hash_func(s, &s->window[str]);
+                Posx4 match_head = s->head[ins_h];
+                s->prev[str & s->w_mask]= match_head;
+                s->head[ins_h].pos_s = (match_head.pos_s << 16) ^ str;
                 str++;
                 s->insert--;
                 if (s->lookahead + s->insert < ACTUAL_MIN_MATCH)
                     break;
             }
-            s->ins_h = ins_h;
         }
         /* If the whole input has less than ACTUAL_MIN_MATCH bytes, ins_h is garbage,
          * but this is not important since only literal bytes will be emitted.
@@ -1541,7 +1538,7 @@ static block_state deflate_fast(s, flush)
     deflate_state *s;
     int flush;
 {
-    IPos hash_head;       /* head of the hash chain */
+    Posx4 hash_head;       /* head of the hash chain */
     int bflush;           /* set if current block must be flushed */
 
     for (;;) {
@@ -1561,7 +1558,7 @@ static block_state deflate_fast(s, flush)
         /* Insert the string window[strstart .. strstart+2] in the
          * dictionary, and set hash_head to the head of the hash chain:
          */
-        hash_head = NIL;
+        hash_head.pos_s = NIL;
         if (s->lookahead >= ACTUAL_MIN_MATCH) {
             hash_head = insert_string(s, s->strstart);
         }
@@ -1569,7 +1566,7 @@ static block_state deflate_fast(s, flush)
         /* Find the longest match, discarding those <= prev_length.
          * At this point we have always match_length < ACTUAL_MIN_MATCH
          */
-        if (hash_head != NIL && s->strstart - hash_head <= MAX_DIST(s)) {
+        if (hash_head.pos_s != NIL && s->strstart - hash_head.pos[0] <= MAX_DIST(s)) {
             /* To simplify the code, we prevent matches with the string
              * of window index 0 (in particular we have to avoid a match
              * of the string with itself at the start of the input file).
@@ -1634,7 +1631,7 @@ static block_state deflate_slow(s, flush)
     deflate_state *s;
     int flush;
 {
-    IPos hash_head;          /* head of hash chain */
+    Posx4 hash_head;          /* head of hash chain */
     int bflush;              /* set if current block must be flushed */
 
     /* Process the input block. */
@@ -1655,7 +1652,7 @@ static block_state deflate_slow(s, flush)
         /* Insert the string window[strstart .. strstart+3] in the
          * dictionary, and set hash_head to the head of the hash chain:
          */
-        hash_head = NIL;
+        hash_head.pos_s = NIL;
         if (s->lookahead >= ACTUAL_MIN_MATCH) {
             hash_head = insert_string(s, s->strstart);
         }
@@ -1665,8 +1662,8 @@ static block_state deflate_slow(s, flush)
         s->prev_length = s->match_length, s->prev_match = s->match_start;
         s->match_length = ACTUAL_MIN_MATCH-1;
 
-        if (hash_head != NIL && s->prev_length < s->max_lazy_match &&
-            s->strstart - hash_head <= MAX_DIST(s)) {
+        if (hash_head.pos_s != NIL && s->prev_length < s->max_lazy_match &&
+            s->strstart - hash_head.pos[0] <= MAX_DIST(s)) {
             /* To simplify the code, we prevent matches with the string
              * of window index 0 (in particular we have to avoid a match
              * of the string with itself at the start of the input file).

@@ -137,7 +137,7 @@ typedef struct internal_state {
      * longer time it takes to insert a new hash value
      */
 
-    Pos *head; /* Heads of the hash chains or NIL. */
+    Posx4 *head; /* Heads of the hash chains or NIL. */
 
     uint32_t  ins_h;          /* hash index of string to be inserted */
     uint32_t  hash_size;      /* number of elements in hash table */
